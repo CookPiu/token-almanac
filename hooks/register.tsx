@@ -1377,6 +1377,11 @@ async function refit($: EngineInterface): Promise<void> {
   await update($, machine, () => next)
 }
 
+async function usageText($: EngineInterface): Promise<string> {
+  const lines = usageLines(await read($, snapshot), await read($, samples), await $.clock.now())
+  return lines.length > 0 ? lines.join('\n') : t.paneWaiting
+}
+
 // Takes a reading: the snapshot the band and pane draw, and a forecast sample per window,
 // kept in the store too so the forecast survives a restart within the same window.
 async function record($: EngineInterface, u: Pick<SessionUsage, 'context' | 'rateLimits' | 'cost'>): Promise<void> {
@@ -1949,14 +1954,16 @@ export const register: Register = (on, options) => {
   // Whether the counts came from the transcript; if the computed path missed, the next
   // prompt's settings-hook input names the file.
   let isBackfilled = false
-  // Whether a surface has asked for the band, and whether the status line stands in for it.
-  let isBandAsked = false
-  let isLinePinned = false
 
   on('session.start', async ($, e, next) => {
     setLocale(await resolveLocale($, language))
     await loadPriceOverrides($)
     await $.command.register({ name: 'token-almanac', description: t.commandDescription })
+    await $.tool.register({
+      name: 'usage',
+      description: "This session's cost and context, and each plan limit's percent, reset and fill time. Call it when the person asks about tokens, usage or limits, or sends /token-almanac where that command did not run.",
+      isDeferred: false,
+    })
 
     const now = await $.clock.now()
     if ((await read($, since)) === 0) {
@@ -2000,12 +2007,6 @@ export const register: Register = (on, options) => {
 
   on('session.measure', async ($, e, next) => {
     await record($, e)
-    // A surface that never asks for the band, such as a project's thread, still shows a status line.
-    if (!isBandAsked) {
-      const line = usageLines(await read($, snapshot), await read($, samples), await $.clock.now()).join(' │ ')
-      isLinePinned = line !== ''
-      $.ui.status(isLinePinned ? line : undefined)
-    }
     return next(e)
   })
 
@@ -2066,18 +2067,16 @@ export const register: Register = (on, options) => {
       return { text: t.paneOpened }
     }
     // No room for the pane, or no surface that draws one: answer in text.
-    const lines = usageLines(await read($, snapshot), await read($, samples), await $.clock.now())
-    return { text: lines.length > 0 ? lines.join('\n') : t.paneWaiting }
+    return { text: await usageText($) }
   })
+
+  // A project's thread wraps what the person sends, so a command in it never runs: the model
+  // reads the figures from here, and answers in the thread.
+  on('tool.call', { tool: 'mcp__token-almanac__usage' }, async $ => ({ result: await usageText($) }))
 
   // The one-line summary above the prompt, kept short: the session's cost and context, each
   // limit's percent, and when a limit will fill before it resets, how soon. The rest is in the pane.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    isBandAsked = true
-    if (isLinePinned) {
-      isLinePinned = false
-      $.ui.status(undefined)
-    }
     if (e.props.hasSurvey || (await read($, isBandHidden))) {
       return next(e)
     }

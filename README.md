@@ -17,7 +17,7 @@ A Claude Code mod that shows how much of your plan's usage limits you have used,
 
 Each ring shows the share used, a paler arc for where the window is headed by its reset, and a tick for how far through the window the clock is. In the terminal the same figures are written as text, with meters in place of the rings and the capacity table under them.
 
-Where a session never asks for the band, as a desktop project's thread may not, the cost, context and limits go on the status line instead, and `/token-almanac` answers with them in text when the pane cannot be placed.
+When the pane cannot be placed, `/token-almanac` answers with the cost, context and limits in text. The mod also gives Claude a `usage` tool with the same figures: a desktop project's thread shows neither band nor pane and runs no slash command, so on your computer you can ask Claude there. Threads that run in the cloud do not have this plugin.
 
 The UI is in English or Chinese, picked from the `language` option, then Claude Code's `language` setting, then `LC_ALL` / `LANG`, then the system locale. It renders in the terminal, the desktop app, VS Code and mobile.
 
