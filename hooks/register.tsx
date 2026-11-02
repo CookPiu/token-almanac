@@ -116,6 +116,17 @@ function resetText(resetsAt: string | undefined, now: number): string {
   return Number.isNaN(ms) ? '' : ms <= 0 ? t.resetting : t.resetsIn(fmtDuration(ms))
 }
 
+// The band's figures as plain lines, for a session where neither the band nor the pane is drawn:
+// the session's cost and context first, then one line per limit.
+export function usageLines(snap: Snapshot | null, series: Record<string, Samples>, now: number): string[] {
+  const head = [snap?.costUsd !== undefined ? fmtUsd(snap.costUsd) : '', snap?.contextPercent !== undefined ? t.bandContext(snap.contextPercent) : ''].filter(Boolean).join(' · ')
+  const limits = (snap?.windows ?? []).map(w => {
+    const f = forecast(series[w.kind]?.points ?? [], w.percentUsed, now, w.resetsAt)
+    return [`${windowLabel(w.kind)} ${w.percentUsed}%`, resetText(w.resetsAt, now), f.etaMs !== null ? t.bandFull(fmtDuration(f.etaMs)) : ''].filter(Boolean).join(' · ')
+  })
+  return [head, ...limits].filter(Boolean)
+}
+
 function escapeXml(text: string): string {
   return text.replace(/[<>&"']/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;', "'": '&apos;' })[c] ?? c)
 }
@@ -1938,6 +1949,9 @@ export const register: Register = (on, options) => {
   // Whether the counts came from the transcript; if the computed path missed, the next
   // prompt's settings-hook input names the file.
   let isBackfilled = false
+  // Whether a surface has asked for the band, and whether the status line stands in for it.
+  let isBandAsked = false
+  let isLinePinned = false
 
   on('session.start', async ($, e, next) => {
     setLocale(await resolveLocale($, language))
@@ -1986,6 +2000,12 @@ export const register: Register = (on, options) => {
 
   on('session.measure', async ($, e, next) => {
     await record($, e)
+    // A surface that never asks for the band, such as a project's thread, still shows a status line.
+    if (!isBandAsked) {
+      const line = usageLines(await read($, snapshot), await read($, samples), await $.clock.now()).join(' │ ')
+      isLinePinned = line !== ''
+      $.ui.status(isLinePinned ? line : undefined)
+    }
     return next(e)
   })
 
@@ -2042,12 +2062,22 @@ export const register: Register = (on, options) => {
   on('command.run', { command: 'token-almanac' }, async $ => {
     await update($, isBandHidden, () => false)
     const opened = await $.ui.open({ id: PANE, title: t.paneTitle })
-    return { text: opened.isPlaced ? t.paneOpened : t.paneWaiting }
+    if (opened.isPlaced) {
+      return { text: t.paneOpened }
+    }
+    // No room for the pane, or no surface that draws one: answer in text.
+    const lines = usageLines(await read($, snapshot), await read($, samples), await $.clock.now())
+    return { text: lines.length > 0 ? lines.join('\n') : t.paneWaiting }
   })
 
   // The one-line summary above the prompt, kept short: the session's cost and context, each
   // limit's percent, and when a limit will fill before it resets, how soon. The rest is in the pane.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    isBandAsked = true
+    if (isLinePinned) {
+      isLinePinned = false
+      $.ui.status(undefined)
+    }
     if (e.props.hasSurvey || (await read($, isBandHidden))) {
       return next(e)
     }

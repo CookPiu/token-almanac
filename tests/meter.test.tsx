@@ -60,6 +60,38 @@ describe('forecast', () => {
   })
 })
 
+test('a surface with no band or pane gets the figures as a status line and in text', { options: { language: 'zh' } }, async ($, on) => {
+  const now = T0 + 60 * MIN
+  const lines: (string | undefined)[] = []
+  on('clock.now', () => ({ value: now }))
+  on('clock.every', () => ({ value: { cancel: () => undefined } }) as never)
+  on('store.get', () => ({ value: undefined }) as never)
+  on('store.set', () => ({ value: undefined }) as never)
+  on('session.measure', ($: unknown, e: { changed: string[] }) => ({ changed: e.changed }) as never)
+  on('ui.status', ($: unknown, e: { text?: string }) => (lines.push(e.text), { value: undefined }) as never)
+  on('ui.open', () => ({ value: { isPlaced: false, reason: 'no surface' } }) as never)
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>engine</Text>
+  })
+
+  await $.session.measure({
+    context: { tokens: 50_000, window: 200_000, percent: 25 },
+    rateLimits: [{ kind: 'five_hour', percentUsed: 40, resetsAt: new Date(T0 + 5 * 60 * MIN).toISOString() }],
+    cost: { usd: 1.5 },
+    changed: ['context', 'rateLimits', 'cost'],
+  } as never)
+  expect(lines[lines.length - 1]).toMatch(/\$1\.50 · 上下文 25% │ 5 小时 40% · .*4h0m/)
+
+  const answered = await $.command.run({ command: 'token-almanac', args: '' } as never)
+  expect((answered as { text: string }).text).toMatch(/\$1\.50 · 上下文 25%\n5 小时 40%/)
+
+  // The band appears: it takes over from the status line.
+  const b = await $.ui.mount({ ...band, surface: 'desktop' })
+  await b.unmount()
+  expect(lines[lines.length - 1]).toBeUndefined()
+})
+
 test('turns, models, limits and context reach the band and the pane', { options: { language: 'zh' } }, async ($, on) => {
   let now = T0
   const store: Record<string, unknown> = {}
