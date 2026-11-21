@@ -630,9 +630,9 @@ function solveSegments(
   // A hit is the whole window, exact at 100%: it counts double, unless the window's readings already
   // cut it into pieces, which say the same spend again. The windows from `before` on, held out,
   // count for nothing.
-  const read = new Set(segs.filter(sg => !sg.hit).map(sg => sg.window))
+  const cutWindows = new Set(segs.filter(sg => !sg.hit).map(sg => sg.window))
   const isOut = (wi: number) => opts.before !== undefined && wi >= opts.before
-  const base = segs.map((sg, i) => (isOut(pieceWindow[i]!) ? 0 : sg.hit && !read.has(sg.window) ? 2 : 1))
+  const base = segs.map((sg, i) => (isOut(pieceWindow[i]!) ? 0 : sg.hit && !cutWindows.has(sg.window) ? 2 : 1))
   let robust = opts.warm !== undefined ? [...opts.warm.robust] : segs.map(() => 1)
   const ROUNDING = 0.006
   const SPREAD = 0.1
