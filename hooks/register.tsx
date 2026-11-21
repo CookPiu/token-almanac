@@ -91,19 +91,24 @@ function levelColor(percent: number): string {
 // outlooks applies, for the pane to word.
 export type Forecast = { ratePerHour: number | null; etaMs: number | null; state: 'full' | 'unknown' | 'flat' | 'safe' | 'eta' }
 
+function recentPace(points: readonly [number, number][], percent: number, now: number): { ratePerHour: number; span: number } | null {
+  const base = points.find(([t]) => t >= now - RATE_LOOKBACK_MS && t <= now)
+  if (!base || now - base[0] < RATE_MIN_SPAN_MS) return null
+  const span = now - base[0]
+  return { ratePerHour: Math.max(0, (percent - base[1]) * HOUR / span), span }
+}
+
 // How fast a window fills, from its readings over the last 90 minutes up to now, and when it
 // would be full at that pace. Measuring up to now (not the last reading) lets idle time slow it.
 export function forecast(points: readonly [number, number][], percent: number, now: number, resetsAt?: string): Forecast {
+  const resetMs = Date.parse(resetsAt ?? '') - now
+  if (resetMs <= 0) return { ratePerHour: null, etaMs: null, state: 'unknown' }
   if (percent >= 100) return { ratePerHour: null, etaMs: null, state: 'full' }
-  const recent = points.filter(([t]) => t >= now - RATE_LOOKBACK_MS)
-  const base = recent[0] ?? points[points.length - 1]
-  if (base === undefined || now - base[0] < RATE_MIN_SPAN_MS) {
-    return { ratePerHour: null, etaMs: null, state: 'unknown' }
-  }
-  const ratePerHour = ((percent - base[1]) / (now - base[0])) * HOUR
+  const pace = recentPace(points, percent, now)
+  if (!pace) return { ratePerHour: null, etaMs: null, state: 'unknown' }
+  const { ratePerHour } = pace
   if (ratePerHour <= 0) return { ratePerHour: 0, etaMs: null, state: 'flat' }
   const etaMs = ((100 - percent) / ratePerHour) * HOUR
-  const resetMs = resetsAt ? Date.parse(resetsAt) - now : Number.NaN
   if (!Number.isNaN(resetMs) && etaMs >= resetMs) {
     return { ratePerHour, etaMs: null, state: 'safe' }
   }
@@ -217,6 +222,12 @@ export function globalView(scan: GlobalScan, range: '30d' | 'all'): GlobalView {
   const firstDay = rows.reduce<string | null>((a, r) => (a === null || r[0] < a ? r[0] : a), null)
   const days = firstDay === null ? 0 : Math.round((dayValue(scan.today) - dayValue(firstDay)) / 86_400_000) + 1
 
+  // Forecast from completed local dates. Include idle dates within the history, even when the
+  // first activity in the selected range was later. Today's partial totals stay in the report.
+  const historyStart = scan.rows.reduce((first, row) => row[0] < first ? row[0] : first, scan.today)
+  const profileStart = historyStart < start ? start : historyStart
+  const profileDays = Math.round((dayValue(scan.today) - dayValue(profileStart)) / 86_400_000)
+
   const perDay = new Map<string, Record<string, number>>()
   const projects = new Map<string, { cost: number; tokens: number }>()
   const models = new Map<string, { cost: number; tokens: number }>()
@@ -240,6 +251,7 @@ export function globalView(scan: GlobalScan, range: '30d' | 'all'): GlobalView {
     const m = models.get(model) ?? { cost: 0, tokens: 0 }
     models.set(model, { cost: m.cost + cost, tokens: m.tokens + tokens })
     hours[hour] = (hours[hour] ?? 0) + cost
+    if (day >= scan.today) continue
     const hm = (hoursByModel[model] ??= Array.from({ length: 24 }, () => [0, 0, 0, 0]))
     spendByKind(model, v).forEach((x, k) => (hm[hour]![k]! += x))
   }
@@ -258,7 +270,7 @@ export function globalView(scan: GlobalScan, range: '30d' | 'all'): GlobalView {
     byProject: [...projects].map(([project, x]) => ({ project, ...x })).sort(byCost),
     byModel: [...models].map(([model, x]) => ({ model, ...x })).filter(x => x.tokens > 0).sort(byCost),
     hourly: hours.map(c => (days > 0 ? c / days : 0)),
-    hourlyByModel: Object.fromEntries(Object.entries(hoursByModel).map(([m, hs]) => [m, hs.map(kinds => kinds.map(x => (days > 0 ? x / days : 0)))])),
+    hourlyByModel: Object.fromEntries(Object.entries(hoursByModel).map(([m, hs]) => [m, hs.map(kinds => kinds.map(x => x / profileDays))])),
     unpriced: [...unpriced],
   }
 }
@@ -1180,8 +1192,10 @@ export function fittedWindow(
   hourly: Record<string, number[][]>,
   tzOffsetMin: number,
   now: number,
+  pace: ReturnType<typeof recentPace> = null,
 ): FittedEstimate | null {
-  if (fit === undefined || fit.confidence === 'none') return null
+  const reset = Date.parse(w.resetsAt ?? '')
+  if (reset <= now || fit === undefined || fit.confidence === 'none') return null
   const s = planScale(fit, plan ?? CURRENT)
   if (s === null) return null
 
@@ -1200,24 +1214,52 @@ export function fittedWindow(
   }
   // Dollars per whole window: this window's if it has spent enough to say, else the day's average.
   const profileShare = perHour.reduce((a, b) => a + b, 0)
-  const usdPerWindow = explained >= 0.03 ? windowUsd / explained : profileShare > 0 ? usdHour.reduce((a, b) => a + b, 0) / profileShare : 0
+  if (profileShare <= 0 && explained <= 0) return null
+  const usdPerWindow = explained > 0 && (explained >= 0.03 || profileShare <= 0)
+    ? windowUsd / explained
+    : usdHour.reduce((a, b) => a + b, 0) / profileShare
 
-  const reset = Date.parse(w.resetsAt ?? '')
-  let etaMs: number | null = null
+  let etaMs: number | null = left === 0 ? 0 : null
   let used = 0
+  // Carry the observed pace forward for at most the duration that supports it, then use the
+  // historical hourly profile. Without a profile, the remainder of the window is unknown.
+  const paceEnd = now + (pace?.span ?? 0)
   if (!Number.isNaN(reset)) {
     const offset = tzOffsetMin * MINUTE
     let t = now
     while (t < reset && etaMs === null) {
-      const end = Math.min((Math.floor((t + offset) / HOUR) + 1) * HOUR - offset, reset)
-      const rate = perHour[new Date(t + offset).getUTCHours()]! / HOUR
-      if (rate > 0 && used + rate * (end - t) >= left) etaMs = t + (left - used) / rate - now
+      const usingPace = pace !== null && t < paceEnd
+      if (!usingPace && profileShare <= 0) break
+      const end = Math.min(usingPace ? paceEnd : (Math.floor((t + offset) / HOUR) + 1) * HOUR - offset, reset)
+      const rate = (usingPace ? pace.ratePerHour / 100 : perHour[new Date(t + offset).getUTCHours()]!) / HOUR
+      if (rate > 0 && used + rate * (end - t) >= left) {
+        const fullAt = t + (left - used) / rate
+        if (fullAt < reset) etaMs = fullAt - now
+      }
       used += rate * (end - t)
       t = end
     }
   }
-  const atReset = Number.isNaN(reset) || etaMs !== null ? null : Math.min(1, y + used)
+  const atReset = (profileShare <= 0 && reset > paceEnd) || Number.isNaN(reset) || etaMs !== null ? null : Math.min(1, y + used)
   return { plan: plan ?? CURRENT, capacityUsd: usdPerWindow, remainingUsd: left * usdPerWindow, explained, etaMs, atReset }
+}
+
+// Match the live reset to the scan before using its token mix. After a rollover the historical
+// hourly profile can still be used while the new window waits for its first scan.
+export function estimateForWindow(w: Window, scan: Machine | null, span: '30d' | 'all', picks: readonly PlanChoice[], now: number, samples?: Samples): FittedEstimate | null {
+  const fit = scan?.fits[w.kind]
+  if (!scan || !fit) return null
+  const reset = Date.parse(w.resetsAt ?? '')
+  const length = windowLength(w.kind)
+  const start = length === null ? NaN : reset - length
+  const plan = planAt(picks, start) ?? fit.windowPlans[String(reset)] ?? fit.latest
+  const cached = scan.windows[w.kind]
+  const spend = cached?.start === start ? cached.byModel : undefined
+  const last = samples?.points[samples.points.length - 1]
+  const fresh = samples && Number.isFinite(reset) && samples.resetsAt === w.resetsAt &&
+    last && last[0] <= now && now - last[0] <= RATE_MIN_SPAN_MS
+  const pace = fresh ? recentPace(samples.points, w.percentUsed, now) : null
+  return fittedWindow(w, fit, plan, spend, scan.views[span].hourlyByModel, scan.tzOffsetMin, now, pace)
 }
 
 // ---- Engine calls ---------------------------------------------------------
@@ -2139,6 +2181,7 @@ export const register: Register = (on, options) => {
     const Svg = e.surface === 'terminal' ? undefined : $.ui.resolve(e).Svg
     const lineWidth = Math.max(12, Math.min(32, e.props.bodyColumns - 22))
     const shortModel = (m: string) => m.replace(/^claude-/, '')
+    const picks = await read($, planChoices)
     const span = await read($, range)
     const g = scan?.views[span] ?? null
     const kindLabel = (k: number) => t.kinds[TOKEN_KINDS[k]!]
@@ -2217,10 +2260,11 @@ export const register: Register = (on, options) => {
     // Where the window is headed by its reset, in percent, when the outlook says.
     const outlookOf = (w: Window): { text: string; projected: number | null } => {
       const fit = fitted[w.kind]
-      const est = scan !== null && g !== null ? fittedWindow(w, fit, fit?.latest ?? null, scan.windows[w.kind]?.byModel, g.hourlyByModel, scan.tzOffsetMin, now) : null
+      const est = estimateForWindow(w, scan, span, picks, now, series[w.kind])
+      if (w.percentUsed >= 100 && !(Date.parse(w.resetsAt ?? '') <= now)) return { text: t.full, projected: 100 }
       if (est !== null && fit !== undefined && fit.confidence !== 'low') {
         if (est.etaMs !== null) return { text: t.fullIn(fmtDuration(est.etaMs)), projected: 100 }
-        return est.atReset !== null ? { text: t.atReset((est.atReset * 100).toFixed(0)), projected: est.atReset * 100 } : { text: '', projected: null }
+        if (est.atReset !== null) return { text: t.atReset((est.atReset * 100).toFixed(0)), projected: est.atReset * 100 }
       }
       const f = forecast(series[w.kind]?.points ?? [], w.percentUsed, now, w.resetsAt)
       const hoursLeft = (Date.parse(w.resetsAt ?? '') - now) / HOUR
@@ -2242,8 +2286,7 @@ export const register: Register = (on, options) => {
               const length = windowLength(w.kind)
               const reset = Date.parse(w.resetsAt ?? '')
               const outlook = outlookOf(w)
-              const fit = fitted[w.kind]
-              const est = scan !== null && g !== null ? fittedWindow(w, fit, fit?.latest ?? null, scan.windows[w.kind]?.byModel, g.hourlyByModel, scan.tzOffsetMin, now) : null
+              const est = estimateForWindow(w, scan, span, picks, now, series[w.kind])
               return {
                 lines: est === null ? [] : [`${t.colWhole} ≈ ${roughUsd(est.capacityUsd)}`, `${t.colLeft} ≈ ${roughUsd(est.remainingUsd)}`],
                 label: windowLabel(w.kind),
@@ -2453,7 +2496,6 @@ export const register: Register = (on, options) => {
 
     const top = g.byModel.slice(0, 3).map(m => m.model)
     const Form = e.surface === 'mobile' ? null : $.ui.resolve(e)
-    const picks = await read($, planChoices)
     const pickNow = planAt(picks, now)
     const day = (ms: number) => new Date(ms + scan.tzOffsetMin * MINUTE).toISOString().slice(0, 10)
     const detailView = (
@@ -2517,7 +2559,7 @@ export const register: Register = (on, options) => {
     // limit hits under the plan in force now as a check that needs no fit.
     const capacityRows = (snap?.windows ?? []).map(w => {
       const fit = fitted[w.kind]
-      const est = fittedWindow(w, fit, fit?.latest ?? null, scan.windows[w.kind]?.byModel, g.hourlyByModel, scan.tzOffsetMin, now)
+      const est = estimateForWindow(w, scan, span, picks, now, series[w.kind])
       const outlook =
         est === null ? '' : w.percentUsed >= 100 ? t.full : est.etaMs !== null ? t.fullIn(fmtDuration(est.etaMs)) : est.atReset !== null ? t.atReset((est.atReset * 100).toFixed(0)) : ''
       return { w, fit, est, outlook }

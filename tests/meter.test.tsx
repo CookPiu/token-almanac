@@ -51,6 +51,11 @@ describe('forecast', () => {
     expect(forecast([[T0, 30]], 100, T0 + 30 * MIN, reset).state).toBe('full')
   })
 
+  test('old readings cannot predict a new burst, and expired windows have no ETA', () => {
+    expect(forecast([[T0, 10]], 90, T0 + 120 * MIN, reset).state).toBe('unknown')
+    expect(forecast([[T0, 90]], 100, Date.parse(reset), reset).state).toBe('unknown')
+  })
+
   test('formats', () => {
     expect(fmtTokens(950)).toBe('950')
     expect(fmtTokens(1234)).toBe('1.2k')

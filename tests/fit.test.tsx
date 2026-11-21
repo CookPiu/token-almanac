@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { compactWindow, costOf, fitKind, fittedWindow, guessPlan, segmentsOf, shareOf, spendByKind, stretchesOf } from '../hooks/register'
-import type { Observation, PlanChoice, Vec } from '../types'
+import { compactWindow, costOf, estimateForWindow, fitKind, fittedWindow, guessPlan, segmentsOf, shareOf, spendByKind, stretchesOf } from '../hooks/register'
+import type { GlobalView, Machine, Observation, PlanChoice, Vec } from '../types'
 
 const M = 1_000_000
 const HOUR = 3_600_000
@@ -252,6 +252,44 @@ describe('fit', () => {
     expect(Math.abs(e.capacityUsd / 174 - 1) < 0.15).toBe(true)
     expect(e.etaMs).toBeNull()
     expect(e.atReset !== null && e.atReset > 0.54 && e.atReset < 0.56).toBe(true)
+  })
+
+  test('rollover uses the new plan and discards the previous window token mix', () => {
+    const model = 'claude-opus-5-5'
+    const rates = { [model]: Array.from({ length: 24 }, () => [0, 10, 0, 0]) }
+    const view: GlobalView = { days: 1, totalCost: 240, totalTokens: 0, daily: [], byProject: [], byModel: [], hourly: [], hourlyByModel: rates, unpriced: [] }
+    const calibrated = { ...fit, latest: 'pro', s: { pro: 1, max5x: 3 }, f: { [model]: 1 }, g: [0.01, 0.01, 0.001, 0.01] }
+    const scan: Machine = { at: NOW, files: 1, tzOffsetMin: 0, fits: { five_hour: calibrated }, hits: {}, views: { '30d': view, all: view },
+      windows: { five_hour: { start: NOW - 5 * HOUR, byModel: { [model]: [0, 0, 500 * M, 0, 0] }, byProject: {} } } }
+    const w = { kind: 'five_hour', percentUsed: 90, resetsAt: new Date(NOW + 5 * HOUR).toISOString() }
+    const picks = [{ at: NOW, plan: 'max5x' }, { at: NOW + HOUR, plan: 'pro' }]
+    const e = estimateForWindow(w, scan, '30d', picks, NOW + HOUR)!
+    expect(e.explained).toBe(0)
+    expect(Math.round(e.remainingUsd)).toBe(30)
+    expect(Math.round(e.etaMs! / 60_000)).toBe(180)
+    // A 20-point rise over the last hour carries the remaining 10 points in 30 minutes.
+    const samples = { resetsAt: w.resetsAt, points: [[NOW, 70], [NOW + HOUR, 90]] as [number, number][] }
+    const live = estimateForWindow(w, scan, '30d', picks, NOW + HOUR, samples)!
+    expect(Math.round(live.etaMs! / 60_000)).toBe(30)
+    const previous = { ...samples, resetsAt: new Date(NOW).toISOString() }
+    expect(estimateForWindow(w, scan, '30d', picks, NOW + HOUR, previous)!.etaMs).toBe(e.etaMs)
+    expect(estimateForWindow(w, scan, '30d', picks, NOW + 1.5 * HOUR, samples)!.etaMs).toBe(e.etaMs)
+    // A 5-point rise lasts one hour, then the remaining 5 points take 90 minutes at the historical rate.
+    samples.points[0]![1] = 85
+    expect(Math.round(estimateForWindow(w, scan, '30d', picks, NOW + HOUR, samples)!.etaMs! / 60_000)).toBe(150)
+  })
+
+  test('a fill exactly at reset has no early ETA, and missing pace is unknown', () => {
+    const model = 'claude-opus-5-5'
+    const calibrated = { ...fit, f: { [model]: 1 }, g: [0.125, 0.125, 0.125, 0.125], s: { pro: 1 } }
+    const rates = { [model]: Array.from({ length: 24 }, () => [0, 1, 0, 0]) }
+    const w = { kind: 'five_hour', percentUsed: 75, resetsAt: new Date(NOW + 2 * HOUR).toISOString() }
+    const exact = fittedWindow(w, calibrated, 'pro', {}, rates, 0, NOW)!
+    expect([exact.etaMs, exact.atReset]).toEqual([null, 1])
+    const cold = fittedWindow(w, calibrated, 'pro', { [model]: [0, 1000, 0, 0, 0] }, {}, 0, NOW)!
+    expect([cold.capacityUsd, cold.etaMs, cold.atReset]).toEqual([8, null, null])
+    expect(fittedWindow(w, calibrated, 'pro', {}, {}, 0, NOW)).toBeNull()
+    expect(fittedWindow(w, calibrated, 'pro', {}, rates, 0, NOW + 2 * HOUR)).toBeNull()
   })
 
   test('no data, no fit', () => {

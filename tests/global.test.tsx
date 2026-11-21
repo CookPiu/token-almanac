@@ -52,6 +52,20 @@ describe('global view', () => {
     expect(g.unpriced).toEqual(['<synthetic>'])
   })
 
+  test('hourly predictions count idle dates and use only completed local dates', () => {
+    const model = 'claude-opus-5-5'
+    const scan: GlobalScan = { ...scanWith(0), rows: [
+      ['2026-09-01', 12, 'p', model, 0, M, 0, 0, 0],
+      ['2026-10-09', 18, 'p', model, 0, 29 * M, 0, 0, 0],
+      ['2026-10-10', 9, 'p', model, 0, 20 * M, 0, 0, 0],
+    ] }
+    const view = globalView(scan, '30d')
+    // 29 completed dates in range, including the 28 with no use. Today's morning is in totals.
+    expect(view.hourlyByModel[model]![18]![1]).toBe(20)
+    expect(view.hourlyByModel[model]![9]![1]).toBe(0)
+    expect(view.totalCost).toBe(980)
+  })
+
   test('all of history', () => {
     const g = globalView(scanWith(M), 'all')
     expect(g.days).toBe(31 + 30 + 10)
