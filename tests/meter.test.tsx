@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { fmtDuration, fmtTokens, forecast, moveTo, niceTicks, positionOf, ringsCard } from '../hooks/register'
+import { fmtDuration, fmtTokens, forecast, limitsCard, moveTo, niceTicks, positionOf } from '../hooks/register'
 
 const PLUGIN = 'token-almanac'
 const MIN = 60_000
@@ -116,14 +116,16 @@ test('turns, models, limits and context reach the band and the pane', { options:
     await b.unmount()
 
     const p = await $.ui.mount({ ...pane, surface })
-    // The desktop sets its figures in drawn cards, the makeup and models behind the breakdown;
-    // the terminal writes them all as text.
-    if (surface === 'desktop') await p.press({ key: 'details' })
+    // The desktop sets its figures in drawn cards, the terminal writes them as text; on both the
+    // makeup and models are behind the breakdown.
+    expect(await p.find({ text: /haiku-5-5/ })).toBeUndefined()
+    await p.press({ key: 'details' })
     const drawn = surface === 'desktop' ? JSON.stringify(await p.findAll({ type: 'Svg' })) : ''
     const shows = async (text: string | RegExp) => (surface === 'desktop' ? expect(drawn).toMatch(text) : must(p, { text }))
-    // The limits lead: when each resets and the outlook in one line.
-    await shows(/4h0m后重置 · 约 3h0m 后用满/)
-    await shows(/按当前节奏用不满/)
+    // The limits lead: when each resets and how it goes at the current pace, in one line (with no
+    // scan there is no usual pace to tell).
+    await shows(/4h0m后重置 · 当前速度约 3h0m 后用满/)
+    await shows(/当前速度 → 约 \d+%/)
     await shows('$1.50')
     await shows('25%')
     await shows('上下文 200k')
@@ -137,6 +139,8 @@ test('turns, models, limits and context reach the band and the pane', { options:
     } else {
       await must(p, { text: /^[▁▂▃▄▅▆▇█]{2}$/ })
     }
+    // The breakdown is folded again for the next surface.
+    await p.press({ key: 'details' })
     await p.unmount()
   }
   // Readings were kept for a restart within the same window.
@@ -161,28 +165,40 @@ describe('motion', () => {
     expect(moveTo('test:b', 30, T0 + 200).from).toBe(mid)
   })
 
-  test('a new value glides; once the move is over the ring is drawn still, so a fresh image does not play it again', () => {
-    const row = (percent: number, at: number) => ({ label: '5h', percent, move: moveTo('test:meter', percent, at), projected: null, elapsed: null, reset: '', outlook: '', lines: [] })
-    const key = { elapsed: 'elapsed', projected: 'projected' }
-    // A ring of radius 40 is 251.3 around: 40% leaves 150.8 of it undrawn.
-    const a = ringsCard([row(40, T0)], key, T0)
-    expect(a).toContain('<animate attributeName="stroke-dashoffset" from="251.3" to="150.8"')
-    // Drawn again after the move: the still ring, the same as one drawn without a move.
-    expect(ringsCard([row(40, T0 + 30_000)], key, T0 + 30_000)).toBe(ringsCard([{ ...row(40, T0 + 30_000), move: null }], key, T0 + 30_000))
-    const b = ringsCard([row(55, T0 + 60_000)], key, T0 + 60_000)
-    expect(b).toContain('from="150.8" to="113.1"')
+  test('a new value glides; once the move is over the bar is drawn still, so a fresh image does not play it again', () => {
+    const row = (percent: number, at: number) => ({ label: '5h', percent, move: moveTo('test:meter', percent, at), projected: null, paceProjected: null, elapsed: null, parts: [] })
+    // The bar runs 288 wide from x 112: 40% fills 115.2 of it.
+    const a = limitsCard([row(40, T0)], T0)
+    expect(a).toContain('<animate attributeName="width" from="10.0" to="115.2"')
+    // Drawn again after the move: the still bar, the same as one drawn without a move.
+    expect(limitsCard([row(40, T0 + 30_000)], T0 + 30_000)).toBe(limitsCard([{ ...row(40, T0 + 30_000), move: null }], T0 + 30_000))
+    const b = limitsCard([row(55, T0 + 60_000)], T0 + 60_000)
+    expect(b).toContain('from="115.2" to="158.4"')
   })
 
-  test('a limit shows where it is headed, how far through its window the clock is and what it holds, with a key', () => {
-    const svg = ringsCard(
-      [{ label: '每周', percent: 46, move: null, projected: 80, elapsed: 0.3, reset: '4d21h后重置', outlook: '约 1d18h 后用满', lines: ['整窗 ≈ $294', '剩余 ≈ $159'] }],
-      { elapsed: '窗口时间进度', projected: '按节奏预计到重置' },
-      T0,
-    )
-    // The paler arc reaches 80% (a fifth undrawn); the tick sits three tenths of the way round.
-    expect(svg).toContain('stroke-dashoffset="50.27" transform="rotate(-90 200.0 49)" stroke="#D97757" stroke-opacity="0.25"')
-    expect(svg).toContain('x1="230.9" y1="59.0"')
-    for (const text of ['46%', '每周', '4d21h后重置', '约 1d18h 后用满', '整窗 ≈ $294', '剩余 ≈ $159', '窗口时间进度', '按节奏预计到重置']) expect(svg).toContain(text)
+  test('a limit shows where it is headed each way and how far through its window the clock is, each part of its line led by its mark', () => {
+    const parts = [
+      { text: '4d21h后重置', mark: 'elapsed' as const },
+      { text: '当前速度约 1d18h 后用满', mark: 'pace' as const },
+      { text: '历史节奏 → 约 80%', mark: 'usual' as const },
+      { text: '剩余 ≈ $159', mark: null },
+    ]
+    const svg = limitsCard([{ label: '每周', percent: 46, move: null, projected: 80, paceProjected: 100, elapsed: 0.3, parts }], T0)
+    // The usual pace's stretch reaches 80% of the bar, the current pace's, paler, all of it; the tick
+    // sits three tenths of the way along.
+    expect(svg).toContain('width="230.4" height="10" fill="#D97757" fill-opacity="0.4"')
+    expect(svg).toContain('width="288.0" height="10" fill="#D97757" fill-opacity="0.18"')
+    expect(svg).toContain('<line x1="198.4" x2="198.4"')
+    for (const text of ['46%', '每周', ...parts.map(p => p.text)]) expect(svg).toContain(text)
+    // Each mark before its text: the tick's, then a swatch as pale as each stretch.
+    expect(svg.match(/fill-opacity="0\.18"/g)?.length).toBe(2)
+    expect(svg.match(/fill-opacity="0\.4"/g)?.length).toBe(2)
+    // The line runs on to a second line where it is wider than the card.
+    const y = (text: string) => Number(/y="([\d.]+)"[^<]*$/.exec(svg.slice(0, svg.indexOf(`>${text}<`)))![1])
+    expect(y('剩余 ≈ $159') > y('4d21h后重置')).toBe(true)
+    // Where a window is not headed past what it has used, no stretch is drawn.
+    const still = limitsCard([{ label: '5h', percent: 30, move: null, projected: 20, paceProjected: null, elapsed: null, parts: [] }], T0)
+    expect(still).not.toContain('fill-opacity')
   })
 
   test('gridlines fall on clean values just past the top', () => {

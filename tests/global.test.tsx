@@ -123,17 +123,21 @@ test('the pane switches to the global view, scans, and changes range', { options
 
   for (const surface of ['terminal', 'desktop'] as const) {
     const p = await $.ui.mount({ ...pane, surface })
-    // The desktop sets its figures in drawn cards; the terminal writes them as text.
+    // The desktop sets its lists in drawn cards; the terminal writes them as text.
     const shows = async (text: string) => (surface === 'desktop' ? expect(JSON.stringify(await p.findAll({ type: 'Svg' }))).toContain(text) : must(p, { text }))
     await must(p, { text: /3 个文件 · 刚刚更新/ })
-    await shows('$7.00')
-    await shows('日均')
-    // The details stay folded until asked for; on the drawing surfaces the projects are among them.
+    // The range's total heads the days, with the daily average.
+    await must(p, { text: '$14.00' })
+    await must(p, { text: /近 30 天折算 · 日均 \$7\.00/ })
+    // The breakdown and how the estimates are made stay folded until asked for.
     expect(await p.find({ text: /未定价/ })).toBeUndefined()
-    await p.press({ key: 'details' })
+    await must(p, { text: '模型、项目' })
+    await p.press({ key: 'basis' })
     await must(p, { text: /未定价、按 0 计：<synthetic>/ })
+    await p.press({ key: 'details' })
     await shows('Projects/oss')
     await p.press({ key: 'details' })
+    await p.press({ key: 'basis' })
     if (surface === 'desktop') await must(p, { type: 'Svg' })
     else await must(p, { text: /10-09/ })
     await p.unmount()
@@ -141,7 +145,7 @@ test('the pane switches to the global view, scans, and changes range', { options
 
   const p = await $.ui.mount({ ...pane, surface: 'terminal' })
   await p.press({ key: 'range-all' })
-  await must(p, { text: /71 天/ })
+  await must(p, { text: /全部折算 · 日均/ })
   await p.press({ key: 'tab-session' })
   await must(p, { text: '构成' })
   await p.unmount()
@@ -200,7 +204,7 @@ test('a window that has reset goes into the history: its readings leave the log,
   // pieces besides the open one's.
   await p.press({ key: 'rescan' })
   expect(sent).toEqual([83, 22])
-  await p.press({ key: 'details' })
+  await p.press({ key: 'basis' })
   const head = await p.find({ text: /\d+ 段/ })
   expect(Number(/(\d+) 段/.exec(JSON.stringify(head))?.[1]) > archive.length).toBe(true)
   await p.unmount()
@@ -343,34 +347,27 @@ test('the global view leads with what each window holds and has left', { options
   }
   const first = await $.ui.mount({ ...pane, surface: 'terminal' })
   await first.press({ key: 'tab-global' })
-  // The estimates sit in the details. No plan picked yet: they say so and ask for one.
-  await first.press({ key: 'details' })
-  await must(first, { text: '不确定 · 按 API 价格折算' })
+  // No plan picked yet: the controls ask for one.
   await must(first, { text: /选择你的套餐/ })
   await first.select({ key: 'plan', value: 'pro' })
   await first.unmount()
   expect((store.planChoices as { plan: string }[]).map(c => c.plan)).toEqual(['pro'])
   for (const surface of ['terminal', 'desktop'] as const) {
     const p = await $.ui.mount({ ...pane, surface })
-    await must(p, { text: '容量推算' })
-    await must(p, { text: 'Pro · 按 API 价格折算' })
-    // The terminal writes the table; the desktop draws a card per window with the same figures.
-    const drawn = JSON.stringify(await p.findAll({ type: 'Svg' }))
-    const shows = async (text: string) => (surface === 'desktop' ? expect(drawn).toContain(text) : must(p, { text }))
-    await shows('整窗')
+    // What is left leads, under the limit's bar; what a whole window holds and the past hits are
+    // in how the estimates are made, named by how sure they are.
+    await must(p, { text: /5 小时 低/ })
+    await p.press({ key: 'basis' })
+    const drawn = JSON.stringify(await p.drawn())
     // About $80 a window: $20 so far is a quarter of it, and three quarters are left.
-    const amounts = surface === 'desktop' ? drawn : JSON.stringify(await p.findAll({ text: /^≈ \$\d+$/ }))
-    // Each amount is found more than once (cell and text, or ring and card): the drawn order, once each.
-    const [cap, left] = [...new Set([...amounts.matchAll(/≈ \$(\d+)/g)].map(m => Number(m[1])))]
-    expect(cap! > 60 && cap! < 100).toBe(true)
-    expect(Math.abs(left! - cap! * 0.75) <= 1).toBe(true)
-    await shows('低')
-    await shows('5 小时历史触限 2 次，每次折合 $60–$100')
-    if (surface === 'desktop') {
-      // Both hits sit on the dollar scale; the fit is drawn as an interval plot against output.
-      expect(drawn.match(/r=\\"4\.5\\" fill=\\"#D97757\\" fill-opacity=\\"0\.55\\"/g)?.length).toBe(2)
-      expect(drawn).toContain('每 API 美元相对 output')
-    }
+    const cap = Number(/整窗 ≈ \$(\d+)/.exec(drawn)?.[1])
+    const left = Number(/剩余 ≈ \$(\d+)/.exec(drawn)?.[1])
+    expect(cap > 60 && cap < 100).toBe(true)
+    expect(Math.abs(left - cap * 0.75) <= 1).toBe(true)
+    expect(drawn).toMatch(/2 次触限(",")? · 触限时折合 \$60–\$100/)
+    // The desktop draws the fit as an interval plot against output.
+    if (surface === 'desktop') expect(drawn).toContain('每 API 美元相对 output')
+    await p.press({ key: 'basis' })
     await p.unmount()
   }
 })

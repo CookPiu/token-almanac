@@ -94,8 +94,8 @@ test('the views speak English when asked', { options: { language: 'en' } }, asyn
 
     const p = await $.ui.mount({ ...pane, surface })
     await must(p, { text: 'This session' })
-    // On the drawing surfaces what the session is made of opens on asking.
-    if (surface !== 'terminal') await p.press({ key: 'details' })
+    // What the session is made of opens on asking.
+    await p.press({ key: 'details' })
     await must(p, { text: 'API-equivalent' })
     await must(p, { text: 'Makeup' })
     expect(await p.find({ text: /[一-龥]/ })).toBeUndefined()
@@ -103,11 +103,12 @@ test('the views speak English when asked', { options: { language: 'en' } }, asyn
     if (surface !== 'mobile') {
       await p.press({ key: 'tab-global' })
       await must(p, { text: /2 files · just now/ })
-      // The estimates sit with the fit in the details, already open on the drawing surfaces.
-      if (surface === 'terminal') await p.press({ key: 'details' })
-      await must(p, { text: 'Not sure · API-equivalent' })
+      // No plan picked: the controls ask for one. Where the figures come from is told with how the
+      // estimates are made.
       await must(p, { text: /Pick your plan/ })
+      await p.press({ key: 'basis' })
       await must(p, { text: /From the Claude Code transcripts/ })
+      await p.press({ key: 'basis' })
       await p.press({ key: 'details' })
       await p.press({ key: 'tab-session' })
     }
@@ -178,9 +179,8 @@ test('a plan picked in the pane is kept; a change within a day corrects it, a la
   await $.session.measure({ context: { tokens: 1000, window: 200_000, percent: 1 }, rateLimits: [{ kind: 'five_hour', percentUsed: 10, resetsAt: new Date(T0 + HOUR).toISOString() }], cost: { usd: 0.2 }, changed: ['rateLimits'] } as never)
   const p = await $.ui.mount({ ...pane, surface: 'terminal' })
   await p.press({ key: 'tab-global' })
-  await p.press({ key: 'details' })
   await p.select({ key: 'plan', value: 'max5x' })
-  await must(p, { text: 'Max 5x · API-equivalent' })
+  expect(await p.find({ text: /Pick your plan/ })).toBeUndefined()
   advance(HOUR)
   await p.select({ key: 'plan', value: 'max20x' })
   expect(store.planChoices).toEqual([{ at: T0, plan: 'max20x' }])
@@ -193,7 +193,7 @@ test('a plan picked in the pane is kept; a change within a day corrects it, a la
     { at: T0 + 73 * HOUR, plan: 'pro' },
     { at: T0 + 121 * HOUR, plan: null },
   ])
-  await must(p, { text: 'Not sure · API-equivalent' })
+  await must(p, { text: /Pick your plan/ })
   await p.unmount()
 })
 

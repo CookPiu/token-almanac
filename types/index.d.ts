@@ -151,6 +151,7 @@ declare module 'claude-code' {
       scanStatus: ScanStatus
       planChoices: PlanChoice[]
       details: boolean
+      basis: boolean
     }
   }
 }

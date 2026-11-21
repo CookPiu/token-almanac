@@ -12,10 +12,10 @@ A Claude Code mod that shows how much of your plan's usage limits you have used,
 
 | View | Contents |
 |---|---|
-| This session | Limit rings, cost, tokens, context, turns; per-turn chart (subagent turns folded into the turn that started them); under *Show breakdown*, token makeup by API-equivalent cost and the per-model split |
-| This machine | Limit rings, each with the API-equivalent dollars a full window holds and what is left; your plan, picked from a list; 30-day or all-time totals; daily chart by model; under *Show breakdown*, top models and projects, a capacity card per window (whether it fills before the reset at your usual hourly pace, confidence, past limit hits on your plan on a dollar scale) and the estimate details as interval plots, with any earlier plan inferred from the history |
+| This session | Limit bars, cost, tokens, context, turns; per-turn chart (subagent turns folded into the turn that started them); under *Breakdown*, token makeup by API-equivalent cost and the per-model split |
+| This machine | Limit bars, each with the API-equivalent dollars left; one row of controls for the range (30 days or all time), your plan and a refresh; the range's total and daily average over a daily chart by model; under *Breakdown*, top models and projects; under *How it is estimated*, named by each window's confidence, the fit per window as an interval plot with what a whole window holds and what past limit hits on your plan came to, and any earlier plan inferred from the history |
 
-Each ring shows the share used, a paler arc for where the window is headed by its reset, and a tick for how far through the window the clock is. In the terminal the same figures are written as text, with meters in place of the rings and the capacity table under them.
+Each limit is a row: its name and share used, then a bar filled to that share with two paler stretches for where the window is headed by its reset (at the pace of the last 90 minutes, and at your usual pace for each hour of the day; which one holds depends on whether you keep working, which the history cannot tell), and a tick for how far through the window the clock is. The line under the bar gives when it resets and both outlooks (when the window fills, or where it stands at the reset), each led by the mark it explains, and what is left. The terminal writes the same line under a text meter.
 
 The UI is in English or Chinese, picked from the `language` option, then Claude Code's `language` setting, then `LC_ALL` / `LANG`, then the system locale. It renders in the terminal, the desktop app, VS Code and mobile.
 
