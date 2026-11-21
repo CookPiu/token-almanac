@@ -445,6 +445,8 @@ type Solved = {
   // Each piece's window (index into the windows).
   pieceWindow: number[]
   predict: (i: number, withWindow: boolean) => number
+  // The level of a window's stretch, in logs (0 the latest): a piece's share scales by e^−level.
+  level: (wi: number) => number
 }
 
 // Fits one window kind on its pieces: rise × s[plan] × e^(level + u[window]) ≈ Σ f[model] × Σ g[kind]
@@ -471,9 +473,10 @@ function solveSegments(
   segs: Segment[],
   preferRef: string,
   borrow: Fit | null,
-  opts: { drift?: number; warm?: Solved; heldOut?: number; maxIter?: number; quick?: boolean } = {},
+  opts: { drift?: number; warm?: Solved; before?: number; maxIter?: number; quick?: boolean } = {},
 ): Solved {
-  const drift = opts.drift ?? DRIFT
+  // A refit keeps the stretches of the fit it starts from: none where that one held the level still.
+  const drift = opts.drift ?? (opts.warm?.drift === 0 ? 0 : DRIFT)
   const spend = new Map<string, number>()
   for (const sg of segs) for (const [m, c] of Object.entries(sg.c)) spend.set(m, (spend.get(m) ?? 0) + c.reduce((a, b) => a + b, 0))
   const models = [...spend].sort((a, b) => b[1] - a[1]).map(([m]) => m)
@@ -612,9 +615,11 @@ function solveSegments(
   const isTauFitted = opts.warm === undefined && opts.quick !== true && nW >= MIN_TAU_WINDOWS
 
   // A hit is the whole window, exact at 100%: it counts double, unless the window's readings already
-  // cut it into pieces, which say the same spend again. A window held out counts for nothing.
+  // cut it into pieces, which say the same spend again. The windows from `before` on, held out,
+  // count for nothing.
   const read = new Set(segs.filter(sg => !sg.hit).map(sg => sg.window))
-  const base = segs.map((sg, i) => (pieceWindow[i] === opts.heldOut ? 0 : sg.hit && !read.has(sg.window) ? 2 : 1))
+  const isOut = (wi: number) => opts.before !== undefined && wi >= opts.before
+  const base = segs.map((sg, i) => (isOut(pieceWindow[i]!) ? 0 : sg.hit && !read.has(sg.window) ? 2 : 1))
   let robust = opts.warm !== undefined ? [...opts.warm.robust] : segs.map(() => 1)
   const ROUNDING = 0.006
   const SPREAD = 0.1
@@ -892,29 +897,56 @@ function solveSegments(
     robust,
     pieceWindow,
     predict,
+    level: wi => (windowBin[wi] === 0 ? 0 : p[levelAt(windowBin[wi]!)]!),
   }
 }
 
-// How far the fit misses windows it has not seen: each of the latest windows with a rise enough to
-// say is taken out in turn, the rest fitted again from where the whole fit settled, and the rise
-// of its pieces (those not set aside as unseen use) foretold at its stretch's level. Returns the
-// root mean square of the misses, in logs, and how many windows it rests on.
-function heldOutMiss(kind: string, segs: Segment[], preferRef: string, borrow: Fit | null, whole: Solved): { miss: number; windows: number } | null {
-  const wins = [...new Set(segs.map(sg => sg.window))].sort((a, b) => a - b)
-  if (wins.length < 3) return null
-  const checks: number[] = []
-  for (let wi = wins.length - 1; wi >= 0 && checks.length < HELD_OUT_WINDOWS; wi -= 1) {
-    const pieces = segs.map((sg, i) => i).filter(i => whole.pieceWindow[i] === wi && whole.robust[i]! > 0.5)
-    // A window cut into pieces says its rise by them; its hit would say the same spend again.
-    const own = pieces.some(i => !segs[i]!.hit) ? pieces.filter(i => !segs[i]!.hit) : pieces
+// Each window's own pieces: those its readings cut it into, else its hit (which would say the same
+// spend again).
+function ownPieces(segs: Segment[], pieceWindow: number[], wi: number): number[] {
+  const pieces = segs.map((_, i) => i).filter(i => pieceWindow[i] === wi)
+  return pieces.some(i => !segs[i]!.hit) ? pieces.filter(i => !segs[i]!.hit) : pieces
+}
+
+// What the windows rose over what the fit tells of their spend at their stretch's level, as a
+// factor: the median over the windows with a rise enough to say (those before `before`), every
+// piece counted, those set aside as unseen use too. The pieces' misses are told against the rise
+// each shows, and some rise far past their spend, so the fit settles short of the windows: on the
+// history this was checked on, by about 15% for the median window. The share the limit reports is
+// what runs out, so the fit is scaled to it. 1 below MIN_TAU_WINDOWS windows.
+function windowScale(segs: Segment[], solved: Solved, before = Infinity): number {
+  const nW = Math.min(before, Math.max(-1, ...solved.pieceWindow) + 1)
+  const strays: number[] = []
+  for (let wi = 0; wi < nW; wi += 1) {
+    const own = ownPieces(segs, solved.pieceWindow, wi)
+    const rise = own.reduce((a, i) => a + segs[i]!.dy, 0)
+    const told = own.reduce((a, i) => a + solved.predict(i, false), 0)
+    if (rise >= HELD_OUT_MIN_RISE && told > 0) strays.push(Math.log(rise / told))
+  }
+  return strays.length < MIN_TAU_WINDOWS ? 1 : Math.exp(median(strays)!)
+}
+
+// How well the fit foretells each of the latest windows from the windows before it alone, as the
+// pane foretells the window to come: the windows from it on taken out, the rest fitted again from
+// where the whole fit settled, and its pieces (every one: the limit counts use this machine did
+// not see too) told at the level of the window before it, scaled by windowScale of the windows
+// before it. Returns the misses, in logs and taken whole: their median, the typical miss (on the
+// history this was checked on, the next window missed by less than it about half the time, where
+// a root mean square of the latest windows' misses came to half what the next ones missed by),
+// and their mean, which a window far off moves too, for choosing between fits; and how many
+// windows they rest on. Null when no window says.
+function forecastMiss(kind: string, segs: Segment[], preferRef: string, borrow: Fit | null, whole: Solved): { miss: number; mean: number; windows: number } | null {
+  const nW = Math.max(-1, ...whole.pieceWindow) + 1
+  const misses: number[] = []
+  for (let wi = nW - 1; wi >= MIN_TAU_WINDOWS && misses.length < HELD_OUT_WINDOWS; wi -= 1) {
+    const own = ownPieces(segs, whole.pieceWindow, wi)
     const rise = own.reduce((a, i) => a + segs[i]!.dy, 0)
     if (rise < HELD_OUT_MIN_RISE) continue
-    const out = solveSegments(kind, segs, preferRef, borrow, { warm: whole, heldOut: wi, maxIter: 3 })
-    const told = own.reduce((a, i) => a + out.predict(i, false), 0)
-    if (told > 0) checks.push(Math.log(told / rise))
+    const out = solveSegments(kind, segs, preferRef, borrow, { warm: whole, before: wi, maxIter: 3 })
+    const told = own.reduce((a, i) => a + out.predict(i, false), 0) * Math.exp(out.level(wi) - out.level(wi - 1)) * windowScale(segs, out, wi)
+    if (told > 0) misses.push(Math.abs(Math.log(told / rise)))
   }
-  if (checks.length === 0) return null
-  return { miss: Math.sqrt(checks.reduce((a, x) => a + x * x, 0) / checks.length), windows: checks.length }
+  return misses.length === 0 ? null : { miss: median(misses)!, mean: misses.reduce((a, b) => a + b, 0) / misses.length, windows: misses.length }
 }
 
 // The plan a pick puts in force at a moment; null before any pick, or after "not sure".
@@ -1058,8 +1090,17 @@ export function fitKind(kind: string, all: readonly Observation[], choices: read
   }
 
   const segs = withLabels()
-  const solved = solveSegments(kind, segs, preferRef, borrow)
-  const fit = solved.fit
+  // The level drifts between official changes only where that foretells the latest windows better
+  // than a level held still within each era: with no quiet change to follow, a drifting level
+  // follows each day's few windows and how they strayed, and the window to come is told off by that.
+  const drifting = solveSegments(kind, segs, preferRef, borrow)
+  const still = solveSegments(kind, segs, preferRef, borrow, { drift: 0 })
+  const missDrifting = forecastMiss(kind, segs, preferRef, borrow, drifting)
+  const missStill = forecastMiss(kind, segs, preferRef, borrow, still)
+  const isStill = missStill !== null && missDrifting !== null && missStill.mean < missDrifting.mean
+  const solved = isStill ? still : drifting
+  const scale = windowScale(segs, solved)
+  const fit = { ...solved.fit, g: solved.fit.g.map(x => x * scale), scale }
   const inferred: InferredPlan[] = inferredRuns.map(({ label, members, against }) => {
     const ratio = (fit.s[label] ?? 1) / (planScale(fit, against) ?? 1)
     return {
@@ -1076,11 +1117,11 @@ export function fitKind(kind: string, all: readonly Observation[], choices: read
   // of unknown size leaves the fit to say nothing sure until a window after it is read.
   const since = OFFICIAL_CHANGES.filter(c => c.kind === kind && c.at > windows[windows.length - 1]! - length)
   const later = since.some(c => c.x === null) ? null : since.reduce((a, c) => a * c.x!, 1)
-  // Sure as far as the windows it has not seen bear it out: high within 12% (a typical miss, in
-  // logs) on four windows or more, medium within 30% on two; never above low while the kinds that
-  // set a way of use apart are not told apart (cache bands wider than 15 times), or a change of
-  // unknown size has come since.
-  const held = heldOutMiss(kind, segs, preferRef, borrow, solved)
+  // Sure as far as the latest windows, each foretold from those before it, bear it out: high within
+  // 12% (a typical miss, in logs) on four windows or more, medium within 30% on two; never above
+  // low while the kinds that set a way of use apart are not told apart (cache bands wider than 15
+  // times), or a change of unknown size has come since.
+  const held = isStill ? missStill : missDrifting
   const bandOf = (k: number) => {
     const [lo, hi] = fit.gBand[k] ?? [0, Infinity]
     return Number.isFinite(hi) && lo > 0 ? hi / lo : Infinity
@@ -1102,6 +1143,7 @@ export function fitKind(kind: string, all: readonly Observation[], choices: read
     confidence,
     heldOut: held?.miss ?? null,
     heldOutWindows: held?.windows ?? 0,
+    drifts: !isStill,
     later,
   }
 }

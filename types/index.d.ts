@@ -73,12 +73,17 @@ export type Fit = {
   lent?: string | null
   // How far one window's size strays from its kind's level, in logs.
   tau?: number
+  // The factor g was scaled by so the fit tells the median window's rise (1 with too few windows).
+  scale?: number
   // Official changes to the window's size the windows span, each given a level of its own.
   eras?: number
-  // The typical miss (root mean square, in logs) on the latest windows, each foretold by a fit of
-  // the rest, and how many windows that rests on; null when too few windows say.
+  // The typical miss (median, in logs) on the latest windows, each foretold by a fit of the windows
+  // before it, and how many windows that rests on; null when too few windows say.
   heldOut?: number | null
   heldOutWindows?: number
+  // Whether the level drifts between official changes (it does where that foretold the latest
+  // windows better than a level held still within each era).
+  drifts?: boolean
   // Published changes to the window's size since the latest window began, multiplied; null when
   // one of them was of a size not published.
   later?: number | null

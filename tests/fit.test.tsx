@@ -202,9 +202,43 @@ describe('fit', () => {
     const misses = [LONG.map(x => x * 10), MANY.map(x => x * 3), WRITE.map(x => x * 3)].map(v => shareOf(f2, 'pro', { 'claude-opus-5-5': v as Vec }) / trueShare('pro', 'claude-opus-5-5', v as Vec) - 1)
     // Weighing those pieces down only (Huber) left the long-session share 1.2% heavy. The one
     // piece left in (2.3 points, under 2 spreads) moves the level of the latest days, which these
-    // windows are, the level being free to drift: within 2.5%, and on the safe side.
+    // windows are, the level being free to drift; scaling to the median window's rise adds under
+    // a point: within 3%, and on the safe side.
     expect(f2.unseen ?? 0).toBeGreaterThanOrEqual(2)
-    for (const miss of misses) expect(Math.abs(miss) < 0.025).toBe(true)
+    for (const miss of misses) expect(Math.abs(miss) < 0.03).toBe(true)
+  })
+
+  test('tells a window\'s rise right when its pieces stray widely, as real windows do', () => {
+    // Each step of work takes its true share times a factor that strays by about half (mean 1),
+    // so a 5-point piece strays by a third or so while a whole window stays near the truth.
+    let seed = 7
+    const noise = () => {
+      seed = (seed * 48271) % 2147483647
+      const z = Math.sqrt(-2 * Math.log(seed / 2147483647)) * Math.cos((2 * Math.PI * ((seed * 16807) % 2147483647)) / 2147483647)
+      return Math.exp(0.5 * z - 0.125)
+    }
+    clock = Date.parse('2026-09-24T00:00:00Z')
+    const ways = [times(12, MANY), [...times(30, LONG), ...times(4, MANY)], [...times(8, WRITE), ...times(15, LONG)]]
+    const rough: Observation[] = []
+    for (let i = 0; i < 18; i += 1) {
+      clock += 10 * HOUR
+      const resetsAt = clock + 5 * HOUR
+      let v: Vec = [0, 0, 0, 0, 0]
+      let y = 0
+      ways[i % ways.length]!.forEach((step, k) => {
+        v = add(v, step)
+        y += trueShare('pro', 'claude-opus-5-5', step) * noise()
+        if (y < 1) rough.push({ t: clock + k * 60_000, kind: 'five_hour', y: Math.round(y * 100) / 100, resetsAt, hit: false, byModel: { 'claude-opus-5-5': v } })
+      })
+    }
+    const f2 = fitKind('five_hour', rough)
+    // A whole window of each way of use: within 8% of the truth, where the fit of the pieces alone
+    // fell 13% to 22% short.
+    expect((f2.scale ?? 1) > 1.1).toBe(true)
+    for (const way of ways) {
+      const v = way.reduce(add, [0, 0, 0, 0, 0] as Vec)
+      expect(Math.abs(shareOf(f2, 'current', { 'claude-opus-5-5': v }) / trueShare('pro', 'claude-opus-5-5', v) - 1) < 0.08).toBe(true)
+    }
   })
 
   test('tells dollars at this window\'s own way of use, and walks the hours ahead', () => {
@@ -253,13 +287,25 @@ describe('levels and checks', () => {
     clock = Date.parse('2026-09-24T00:00:00Z')
     const steady = worked('pro', 30)
     const fit = fitKind('five_hour', [...steady, ...worked('cut', 7)])
+    expect(fit.drifts).toBe(true)
     expect(worst(fit, 'cut') < 0.08).toBe(true)
   })
 
-  test('confidence rests on how well windows it has not seen are foretold', () => {
-    // Clean windows: foretold within a few percent, and sure.
+  test('with no change to follow, the level is held still, so windows that strayed do not move it', () => {
+    // Five weeks at one size, each window a fifth or so larger or smaller at random.
+    const sizes = [1, 0.8, 1.25, 0.9, 1.15, 0.75, 1.1, 1.3, 0.85, 1.05, 0.95, 1.2]
+    sizes.forEach((x, i) => (S[`even${i}`] = x))
+    clock = Date.parse('2026-09-24T00:00:00Z')
+    const even = Array.from({ length: 36 }, (_, i) => windowOf(`even${i % sizes.length}`, 'claude-opus-5-5', ways[i % ways.length]!)).flat()
+    const fit = fitKind('five_hour', even)
+    expect(fit.drifts).toBe(false)
+  })
+
+  test('confidence rests on how well each of the latest windows is foretold from those before it', () => {
+    // Clean windows: foretold within a few percent, and sure. Of 11 windows, those after the first
+    // 5 are each foretold from the ones before.
     const clean = fitKind('five_hour', data, choices)
-    expect(clean.heldOutWindows).toBe(8)
+    expect(clean.heldOutWindows).toBe(6)
     expect((clean.heldOut ?? 1) < 0.05).toBe(true)
     expect(clean.confidence).toBe('high')
     // Windows whose size strays by a fifth or so at random: the fit says so, and is less sure.
